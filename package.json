@@ -1,0 +1,14 @@
+{
+  "name": "ad-easy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ad Easy — บันทึกและติดตามผลแคมเปญโฆษณา Facebook, Instagram, TikTok",
+  "type": "commonjs",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
