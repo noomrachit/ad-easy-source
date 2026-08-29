@@ -12,11 +12,21 @@ function makeMemStore() {
   return {
     async init() {},
 
-    async createUser(email, hash, salt) {
+    async createUser(email, hash, salt, consent) {
       if (users.has(email)) return null;
-      var u = { id: "u" + seq++, email: email, hash: hash, salt: salt, createdAt: new Date().toISOString() };
+      var u = { id: "u" + seq++, email: email, hash: hash, salt: salt, consent: !!consent, createdAt: new Date().toISOString() };
       users.set(email, u); byId.set(u.id, u);
       return { id: u.id, email: u.email };
+    },
+    async listSubscribers() {
+      return Array.from(users.values())
+        .filter(function (u) { return u.consent; })
+        .sort(function (a, b) { return a.createdAt < b.createdAt ? 1 : -1; })
+        .map(function (u) { return { email: u.email, createdAt: u.createdAt }; });
+    },
+    async countUsers() {
+      var all = Array.from(users.values());
+      return { total: all.length, subs: all.filter(function (u) { return u.consent; }).length };
     },
     async findUserByEmail(email) { return users.get(email) || null; },
     async findUserById(id) {
