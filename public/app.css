@@ -283,3 +283,55 @@ tr:last-child td{border-bottom:0;}
 .who .av{width:34px; height:34px; border-radius:50%; background:var(--gold); color:var(--ink); display:grid; place-items:center; font-weight:700; font-size:14px; flex:0 0 34px;}
 .who .em{font-size:12.5px; color:#cde0d6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;}
 .who button{background:none; border:0; color:#8fb8a9; font-size:11.5px; cursor:pointer; padding:2px 0; text-decoration:underline;}
+
+/* ---------- หน้าแนะนำแอปก่อนล็อกอิน ---------- */
+.auth .box{width:min(940px,100%);}
+.split{display:grid; gap:24px; align-items:start;}
+@media(min-width:860px){ .split{grid-template-columns:1.05fr .95fr; gap:34px;} }
+.pitch h2{font-size:26px; line-height:1.25; letter-spacing:-.02em; margin:0 0 12px;}
+@media(min-width:860px){ .pitch h2{font-size:31px;} }
+.pitch .lede{color:var(--muted); font-size:14.5px; line-height:1.65; margin:0 0 20px;}
+.pitch ul{list-style:none; margin:0 0 18px; padding:0; display:grid; gap:13px;}
+.pitch li{display:flex; gap:11px; align-items:flex-start;}
+.pitch li .e{font-size:17px; line-height:1.35; flex:none;}
+.pitch li b{display:block; font-size:14px; margin-bottom:2px;}
+.pitch li span span, .pitch li>span:last-child{font-size:13px; color:var(--muted); line-height:1.6;}
+.pitch .honest{
+  background:var(--panel-2); border:1px dashed var(--line); border-radius:13px;
+  padding:12px 14px; font-size:12.5px; color:var(--muted); line-height:1.65; margin:0;
+}
+.pitch .honest b{color:var(--ink);}
+.check{
+  display:flex; gap:10px; align-items:flex-start; margin:0 0 16px;
+  background:var(--panel-2); border:1px solid var(--line-soft); border-radius:12px;
+  padding:11px 13px; cursor:pointer;
+}
+.check input{margin:2px 0 0; flex:none; width:16px; height:16px; accent-color:var(--ink); cursor:pointer;}
+.check span{font-size:12.5px; color:var(--muted); line-height:1.6;}
+
+/* ---------- หน้าเครื่องมือแนะนำ ---------- */
+.card.rec{border-color:var(--ink); box-shadow:var(--sh);}
+.rec .eyebrow2{
+  font-family:var(--mono); font-size:10px; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--coral-ink); margin:0 0 6px;
+}
+.rec h2{font-size:22px; margin:0 0 10px;}
+.rec>p{color:var(--muted); font-size:14px; line-height:1.7; margin:0 0 16px;}
+.rec .row{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;}
+.rec .afd{
+  background:var(--panel-2); border-radius:11px; padding:11px 13px;
+  font-size:12px; color:var(--muted); line-height:1.65; margin:0;
+}
+.prompts{display:grid; gap:14px;}
+.prompt{background:var(--panel); border:2px solid var(--line); border-radius:16px; padding:16px 17px;}
+.ph{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:5px;}
+.ph h3{font-size:15.5px; margin:0; letter-spacing:-.01em;}
+.prompt .why{font-size:12.5px; color:var(--faint); margin:0 0 12px; line-height:1.55;}
+.prompt pre{
+  background:var(--panel-2); border:1px solid var(--line-soft); border-radius:11px;
+  padding:13px 14px; margin:0; font-family:var(--mono); font-size:12px; line-height:1.75;
+  color:var(--ink); white-space:pre-wrap; word-break:break-word; overflow-x:auto;
+}
+.card.nudge{margin-top:20px; border-style:dashed;}
+.card.nudge b{display:block; font-size:15px; margin-bottom:6px;}
+.card.nudge p{font-size:13.5px; color:var(--muted); line-height:1.65; margin:0 0 13px;}
