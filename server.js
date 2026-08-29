@@ -8,6 +8,7 @@ var crypto = require("node:crypto");
 
 var PORT = process.env.PORT || 3000;
 var DB_URL = process.env.DATABASE_URL || "";
+var ADMIN_KEY = process.env.ADMIN_KEY || ""; // ไม่ตั้ง = ปิดหน้าดึงรายชื่อไปเลย
 var PUBLIC = path.join(__dirname, "public");
 
 var store = DB_URL
@@ -174,7 +175,7 @@ async function api(req, res, url) {
     if (pw.length > 200) return json(res, 400, { error: "รหัสผ่านยาวเกินไป" });
     var salt = crypto.randomBytes(16).toString("hex");
     var hash = await hashPassword(pw, salt);
-    var u = await store.createUser(email, hash, salt);
+    var u = await store.createUser(email, hash, salt, b.consent === true);
     if (!u) return json(res, 409, { error: "อีเมลนี้มีคนใช้แล้ว" });
     var tok = crypto.randomBytes(32).toString("hex");
     var exp = new Date(Date.now() + SESSION_DAYS * 864e5).toISOString();
@@ -205,6 +206,29 @@ async function api(req, res, url) {
     if (c) await store.deleteSession(c);
     setSessionCookie(req, res, "", 0);
     return json(res, 200, { ok: true });
+  }
+
+  /* ดึงรายชื่ออีเมลคนที่ยินยอมรับข่าวสาร — สำหรับเจ้าของแอปเท่านั้น
+     เปิดใช้ได้ต่อเมื่อตั้งตัวแปร ADMIN_KEY ไว้ ถ้าไม่ตั้งจะไม่มีทางนี้อยู่เลย */
+  if (p === "/api/subscribers" && m === "GET") {
+    if (!ADMIN_KEY) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    var given = String(url.searchParams.get("key") || "");
+    if (!safeEqual(given, ADMIN_KEY)) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    var subs = await store.listSubscribers();
+    var counts = await store.countUsers();
+    if (url.searchParams.get("format") === "json") {
+      return json(res, 200, { total: counts.total, subscribers: counts.subs, list: subs });
+    }
+    var csv = "email,signed_up_at\n" + subs.map(function (s) {
+      return '"' + String(s.email).replace(/"/g, '""') + '","' + new Date(s.createdAt).toISOString() + '"';
+    }).join("\n") + "\n";
+    res.writeHead(200, {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": 'attachment; filename="adeasy-subscribers.csv"',
+      "cache-control": "no-store",
+      "x-robots-tag": "noindex"
+    });
+    return res.end("﻿" + csv);
   }
 
   var me = await currentUser(req);

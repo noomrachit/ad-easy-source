@@ -18,8 +18,10 @@
 
   var me = null, campaigns = [], guide = [false, false, false, false, false];
   var view = "home", filterPlat = "all", filterStat = "all";
-  var authMode = "login", authMsg = "", busy = false, imp = null;
+  var authMode = "register", authMsg = "", busy = false, imp = null;
   try { view = sessionStorage.getItem("adeasy_tab") || "home"; } catch (e) {}
+  // เครื่องที่เคยล็อกอินแล้วให้ขึ้นหน้าเข้าสู่ระบบ เครื่องใหม่ให้ขึ้นหน้าสมัคร
+  try { if (localStorage.getItem("adeasy_returning") === "1") authMode = "login"; } catch (e) {}
 
   /* ---------- utils ---------- */
   function esc(s) {
@@ -88,26 +90,47 @@
   }
 
   /* ---------- auth screen ---------- */
+  var SELLING = [
+    ["📊", "เห็นทุกแพลตฟอร์มในหน้าเดียว", "Facebook, Instagram, TikTok รวมอยู่ที่เดียว ไม่ต้องเปิดสลับไปมาแล้วจดใส่กระดาษ"],
+    ["📥", "นำเข้าไฟล์จาก Ads Manager ได้เลย", "ส่งออกรายงานเป็น CSV แล้วลากไฟล์เข้ามา ระบบอ่านคอลัมน์ให้เอง ไม่ต้องพิมพ์ทีละช่อง"],
+    ["💡", "บอกด้วยว่าตัวเลขที่เห็นแปลว่าอะไร", "ค่าต่อคลิก อัตราการคลิก คำนวณให้พร้อมบอกว่าเท่าไหร่ถึงเรียกว่าปกติ"],
+    ["🆓", "ใช้ฟรี ไม่มีบัตรเครดิต", "สมัครด้วยอีเมลอย่างเดียว ข้อมูลเก็บบนเซิร์ฟเวอร์ เปิดจากมือถือหรือคอมก็เห็นชุดเดียวกัน"]
+  ];
+
   function renderAuth() {
     var reg = authMode === "register";
+    var sell = SELLING.map(function (s) {
+      return '<li><span class="e">' + s[0] + '</span><span><b>' + esc(s[1]) + "</b>" + esc(s[2]) + "</span></li>";
+    }).join("");
+
     document.getElementById("app").innerHTML =
       '<div class="auth"><div class="box">' +
         '<div class="logo"><span class="mark">A</span><span><b>ad easy</b><small>ทำโฆษณาแบบเข้าใจ</small></span></div>' +
-        '<div class="panel">' +
-          "<h1>" + (reg ? "สมัครใช้งานฟรี" : "เข้าสู่ระบบ") + "</h1>" +
-          '<p class="sub">' + (reg ? "สร้างบัญชีเพื่อเก็บข้อมูลแคมเปญของคุณไว้บนเซิร์ฟเวอร์ เปิดจากเครื่องไหนก็เห็นชุดเดียวกัน" : "ยินดีต้อนรับกลับมา") + "</p>" +
-          (authMsg ? '<div class="authmsg">' + esc(authMsg) + "</div>" : "") +
-          '<form id="authform">' +
-            '<div class="field"><label>อีเมล</label><input name="email" type="email" autocomplete="email" required placeholder="you@example.com"></div>' +
-            '<div class="field"><label>รหัสผ่าน' + (reg ? " (อย่างน้อย 8 ตัวอักษร)" : "") + "</label>" +
-              '<input name="password" type="password" autocomplete="' + (reg ? "new-password" : "current-password") + '" required minlength="8"></div>' +
-            '<button class="btn primary" type="submit" style="width:100%;justify-content:center"' + (busy ? " disabled" : "") + ">" +
-              (busy ? "กำลังดำเนินการ…" : reg ? "สมัครและเริ่มใช้งาน" : "เข้าสู่ระบบ") + "</button>" +
-          "</form>" +
-          '<p class="swap">' + (reg ? "มีบัญชีอยู่แล้ว? " : "ยังไม่มีบัญชี? ") +
-            '<button type="button" data-authswap="1">' + (reg ? "เข้าสู่ระบบ" : "สมัครใช้งานฟรี") + "</button></p>" +
+        '<div class="split">' +
+          '<section class="pitch">' +
+            "<h2>บันทึกผลโฆษณาที่ยิงไป ให้รู้ว่าตัวไหนคุ้ม</h2>" +
+            "<p class=\"lede\">ยิงแอดไปหลายตัวแล้วจำไม่ได้ว่าอันไหนได้ผล? บันทึกไว้ที่นี่ แล้วดูย้อนหลังได้ว่าเดือนไหนใช้เงินไปเท่าไหร่ ได้อะไรกลับมา</p>" +
+            "<ul>" + sell + "</ul>" +
+            '<p class="honest"><b>บอกไว้ก่อนตามตรง:</b> แอปนี้ไม่ได้เชื่อมต่อกับบัญชีโฆษณาของคุณโดยตรง คุณยังต้องสร้างและจัดการโฆษณาใน Ads Manager ตามปกติ ที่นี่มีไว้บันทึกและดูผลรวมไว้ที่เดียว</p>' +
+          "</section>" +
+          '<div class="panel">' +
+            "<h1>" + (reg ? "สมัครใช้งานฟรี" : "เข้าสู่ระบบ") + "</h1>" +
+            '<p class="sub">' + (reg ? "ใช้แค่อีเมลกับรหัสผ่าน ไม่ต้องกรอกอย่างอื่น" : "ยินดีต้อนรับกลับมา") + "</p>" +
+            (authMsg ? '<div class="authmsg">' + esc(authMsg) + "</div>" : "") +
+            '<form id="authform">' +
+              '<div class="field"><label>อีเมล</label><input name="email" type="email" autocomplete="email" required placeholder="you@example.com"></div>' +
+              '<div class="field"><label>รหัสผ่าน' + (reg ? " (อย่างน้อย 8 ตัวอักษร)" : "") + "</label>" +
+                '<input name="password" type="password" autocomplete="' + (reg ? "new-password" : "current-password") + '" required minlength="8"></div>' +
+              (reg ? '<label class="check"><input type="checkbox" name="consent" value="1">' +
+                "<span>ส่งเคล็ดลับยิงแอดและรีวิวเครื่องมือช่วยทำโฆษณาให้ทางอีเมล เดือนละ 1–2 ฉบับ ยกเลิกได้ทุกเมื่อ (ไม่ติ๊กก็ใช้แอปได้ครบเหมือนกัน)</span></label>" : "") +
+              '<button class="btn primary" type="submit" style="width:100%;justify-content:center"' + (busy ? " disabled" : "") + ">" +
+                (busy ? "กำลังดำเนินการ…" : reg ? "สมัครและเริ่มใช้งาน" : "เข้าสู่ระบบ") + "</button>" +
+            "</form>" +
+            '<p class="swap">' + (reg ? "มีบัญชีอยู่แล้ว? " : "ยังไม่มีบัญชี? ") +
+              '<button type="button" data-authswap="1">' + (reg ? "เข้าสู่ระบบ" : "สมัครใช้งานฟรี") + "</button></p>" +
+          "</div>" +
         "</div>" +
-        '<p class="foot">แอปนี้ใช้บันทึกและติดตามผลแคมเปญเท่านั้น ไม่ได้เชื่อมต่อกับบัญชีโฆษณาของคุณโดยตรง</p>' +
+        '<p class="foot">เราเก็บแค่อีเมลกับข้อมูลแคมเปญที่คุณกรอกเอง ไม่ขายข้อมูลให้ใคร</p>' +
       "</div></div>";
     var f = document.getElementById("authform");
     if (f) f.addEventListener("submit", onAuthSubmit);
@@ -119,10 +142,15 @@
     var fd = new FormData(e.target);
     var email = String(fd.get("email") || "").trim();
     var password = String(fd.get("password") || "");
+    var consent = fd.get("consent") === "1";
     if (password.length < 8) { authMsg = "รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร"; renderAuth(); return; }
     busy = true; authMsg = ""; renderAuth();
-    api("/api/" + (authMode === "register" ? "register" : "login"), { method: "POST", body: { email: email, password: password } })
-      .then(function () { busy = false; return load(); })
+    api("/api/" + (authMode === "register" ? "register" : "login"), { method: "POST", body: { email: email, password: password, consent: consent } })
+      .then(function () {
+        busy = false;
+        try { localStorage.setItem("adeasy_returning", "1"); } catch (err) {}
+        return load();
+      })
       .catch(function (err) { busy = false; authMsg = err.message; renderAuth(); });
   }
 
@@ -166,12 +194,14 @@
       ["home", "ภาพรวม", "grid"],
       ["camp", "แคมเปญของฉัน", "target"],
       ["import", "นำเข้าไฟล์ CSV", "upload"],
-      ["guide", "คู่มือเริ่มต้น", "book"]
+      ["guide", "คู่มือเริ่มต้น", "book"],
+      ["tools", "เครื่องมือแนะนำ", "bolt"]
     ].map(function (n) {
       return '<button type="button" data-go="' + n[0] + '"' + (view === n[0] ? ' aria-current="true"' : "") + ">" + icon(n[2]) + "<span>" + n[1] + "</span></button>";
     }).join("");
 
-    var body = view === "camp" ? pageCampaigns() : view === "import" ? pageImport() : view === "guide" ? pageGuide() : pageHome();
+    var body = view === "camp" ? pageCampaigns() : view === "import" ? pageImport()
+      : view === "guide" ? pageGuide() : view === "tools" ? pageTools() : pageHome();
 
     document.getElementById("app").innerHTML =
       '<div class="shell">' +
@@ -272,7 +302,63 @@
     }).join("");
     return heading("คู่มือเริ่มต้น", "ยิงแอดครั้งแรกให้ไม่เสียเงินฟรี", "ห้าข้อที่คนยิงแอดเองมักพลาดในเดือนแรก อ่านแล้วติ๊กเก็บไว้ได้") +
       '<p style="font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin:0 0 14px">อ่านแล้ว ' + done + " จาก " + GUIDE.length + " ข้อ</p>" +
-      '<div class="steps">' + steps + "</div>";
+      '<div class="steps">' + steps + "</div>" +
+      '<div class="card nudge"><b>ติดตรงข้อ 3 — ทำโฆษณาหลายแบบไม่ไหว?</b>' +
+      "<p>เรารวมชุดคำสั่งสำหรับให้ AI ช่วยเขียนแคปชันและพาดหัวหลายแบบไว้ให้แล้ว ก๊อปไปใช้ได้เลย</p>" +
+      '<button class="btn ghost sm" type="button" data-go="tools">ดูชุดคำสั่ง</button></div>';
+  }
+
+  /* ---------- เครื่องมือแนะนำ ---------- */
+  var AFF_LINK = "https://www.chatplayground.ai/?ref=rachitdr";
+  var HUB_LINK = "https://aireview-th.netlify.app";
+
+  var PROMPTS = [
+    {
+      t: "เขียนแคปชันขายของ 5 แบบไว้เทส",
+      why: "คู่มือข้อ 3 บอกให้ทำโฆษณาอย่างน้อย 3 แบบต่อแคมเปญ — อันนี้ทำให้ครบใน 1 นาที",
+      p: "ช่วยเขียนแคปชันโฆษณา Facebook ภาษาไทย 5 แบบสำหรับ [ชื่อสินค้า/บริการ]\nกลุ่มลูกค้า: [เช่น ผู้หญิง 25-40 ปี ในกรุงเทพ]\nจุดขายหลัก: [เช่น ราคาถูกกว่าร้านทั่วไป 30%]\n\nขอให้แต่ละแบบใช้มุมต่างกัน เช่น มุมปัญหา มุมราคา มุมรีวิวลูกค้า มุมความเร่งด่วน มุมเล่าเรื่อง\nความยาวไม่เกิน 3 บรรทัด มีคำชวนให้ทักเข้ามาตอนท้าย ไม่ต้องใส่แฮชแท็ก"
+    },
+    {
+      t: "คิดพาดหัวสั้นสำหรับรูปโฆษณา",
+      why: "พาดหัวบนรูปคือสิ่งที่คนอ่านก่อนตัดสินใจว่าจะหยุดนิ้วไหม",
+      p: "ช่วยคิดพาดหัวสั้นภาษาไทยสำหรับใส่บนรูปโฆษณา [ชื่อสินค้า] จำนวน 10 อัน\nเงื่อนไข: ไม่เกิน 8 คำต่ออัน อ่านแล้วเข้าใจทันทีใน 1 วินาที\nห้ามใช้คำว่า \"ดีที่สุด\" หรือ \"อันดับ 1\" เพราะโฆษณาจะไม่ผ่านการตรวจ\nเรียงจากอันที่คิดว่าคนจะหยุดดูมากที่สุดลงมา"
+    },
+    {
+      t: "หากลุ่มเป้าหมายใหม่ที่ยังไม่เคยลอง",
+      why: "ยิงกลุ่มเดิมซ้ำจนคนเบื่อ ค่าต่อคลิกจะแพงขึ้นเรื่อยๆ",
+      p: "ฉันขาย [สินค้า/บริการ] ราคา [ราคา] บาท ตอนนี้ยิงโฆษณาไปที่กลุ่ม [กลุ่มที่ยิงอยู่] แล้วได้ผลพอใช้\nช่วยเสนอกลุ่มเป้าหมายอื่นอีก 5 กลุ่มที่น่าจะสนใจสินค้านี้เหมือนกันแต่ฉันอาจนึกไม่ถึง\nแต่ละกลุ่มบอกด้วยว่า: ตั้งความสนใจใน Ads Manager ว่าอะไร และควรเปลี่ยนแคปชันยังไงให้ตรงกับกลุ่มนั้น"
+    },
+    {
+      t: "วิเคราะห์ว่าทำไมแอดตัวนี้ไม่ปัง",
+      why: "เอาตัวเลขจากหน้าภาพรวมมาใส่ได้เลย",
+      p: "โฆษณา Facebook ของฉันได้ผลแบบนี้:\nใช้เงินไป [ยอด] บาท / คนเห็น [เลข] ครั้ง / คลิก [เลข] ครั้ง / ทักเข้ามา [เลข] คน\nสินค้าคือ [สินค้า] ราคา [ราคา] บาท\n\nช่วยบอกว่าปัญหาน่าจะอยู่ตรงไหน (รูป พาดหัว กลุ่มเป้าหมาย หรือหน้าที่คนกดเข้าไป)\nและควรแก้อะไรก่อนเป็นอันดับแรก อธิบายเหตุผลด้วย"
+    }
+  ];
+
+  function pageTools() {
+    var cards = PROMPTS.map(function (x, i) {
+      return '<article class="prompt"><div class="ph"><h3>' + esc(x.t) + "</h3>" +
+        '<button class="btn sm ghost" type="button" data-copy="' + i + '">คัดลอก</button></div>' +
+        '<p class="why">' + esc(x.why) + "</p>" +
+        "<pre>" + esc(x.p) + "</pre></article>";
+    }).join("");
+
+    return heading("เครื่องมือแนะนำ", "ช่วยคิดคำโฆษณาให้เร็วขึ้น",
+        "คนยิงแอดหมดเวลาไปกับการคิดแคปชันมากกว่าการดูตัวเลข นี่คือชุดคำสั่งที่เอาไปวางใน AI ได้เลย") +
+      '<div class="card rec">' +
+        '<p class="eyebrow2">เครื่องมือที่เราใช้เอง</p>' +
+        "<h2>ChatPlayground</h2>" +
+        "<p>ถามคำถามเดียว แล้วให้ AI หลายตัว (ChatGPT, Claude, Gemini และอื่นๆ รวม 40+ ตัว) ตอบพร้อมกันในหน้าเดียว " +
+        "สำหรับงานเขียนแคปชันมันมีประโยชน์ตรงที่ได้หลายสำนวนมาเทียบในครั้งเดียว แทนที่จะต้องเปิดทีละเว็บแล้วถามซ้ำ — " +
+        "ตรงกับที่คู่มือบอกว่าควรมีโฆษณาหลายแบบไว้เทส</p>" +
+        '<div class="row"><a class="btn primary" href="' + AFF_LINK + '" target="_blank" rel="noopener sponsored">ลองใช้ ChatPlayground</a>' +
+        '<a class="btn ghost" href="' + HUB_LINK + '" target="_blank" rel="noopener">อ่านรีวิวเครื่องมือ AI ตัวอื่น</a></div>' +
+        '<p class="afd">เปิดเผยตามตรง: ลิงก์ ChatPlayground ด้านบนเป็นลิงก์พันธมิตร ถ้าคุณสมัครผ่านลิงก์นี้เราจะได้ค่าตอบแทนเล็กน้อย ' +
+        "โดยคุณจ่ายเท่าเดิม รายได้ส่วนนี้คือสิ่งที่ทำให้ Ad Easy เปิดให้ใช้ฟรีได้ ไม่ต้องเก็บค่าสมาชิก</p>" +
+      "</div>" +
+      '<h2 style="font-size:19px;margin:26px 0 14px">ชุดคำสั่งพร้อมใช้</h2>' +
+      '<p class="hint" style="margin:-8px 0 16px">ก๊อปไปวางใน AI ตัวไหนก็ได้ แล้วแทนที่ข้อความในวงเล็บ [ ] ด้วยข้อมูลของคุณ</p>' +
+      '<div class="prompts">' + cards + "</div>";
   }
 
   /* ---------- CSV ---------- */
@@ -525,6 +611,25 @@
       guide[i2] = !guide[i2];
       render();
       api("/api/guide", { method: "PUT", body: { guide: guide } }).catch(function () { toast("บันทึกคู่มือไม่สำเร็จ"); });
+      return;
+    }
+    if ((t = el.closest("[data-copy]"))) {
+      var pr = PROMPTS[+t.getAttribute("data-copy")];
+      if (!pr) return;
+      var done = function () { toast("คัดลอกแล้ว วางใน AI ได้เลย"); };
+      var fail = function () { toast("คัดลอกไม่สำเร็จ ลองเลือกข้อความแล้วก๊อปเอง"); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(pr.p).then(done).catch(fail);
+      } else {
+        try {
+          var ta = document.createElement("textarea");
+          ta.value = pr.p; ta.setAttribute("readonly", "");
+          ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.select();
+          document.execCommand("copy") ? done() : fail();
+          document.body.removeChild(ta);
+        } catch (err) { fail(); }
+      }
       return;
     }
     if ((t = el.closest("[data-filter]"))) {

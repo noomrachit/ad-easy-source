@@ -28,8 +28,11 @@ function makePgStore(connectionString) {
         "  email         TEXT UNIQUE NOT NULL," +
         "  hash          TEXT NOT NULL," +
         "  salt          TEXT NOT NULL," +
+        "  consent       BOOLEAN NOT NULL DEFAULT false," +
         "  created_at    TIMESTAMPTZ NOT NULL DEFAULT now())"
       );
+      // สำหรับฐานข้อมูลที่สร้างไว้ก่อนจะมีคอลัมน์ consent
+      await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS consent BOOLEAN NOT NULL DEFAULT false");
       await pool.query(
         "CREATE TABLE IF NOT EXISTS sessions (" +
         "  token      TEXT PRIMARY KEY," +
@@ -64,15 +67,23 @@ function makePgStore(connectionString) {
       await pool.query("DELETE FROM sessions WHERE expires < now()");
     },
 
-    async createUser(email, hash, salt) {
+    async createUser(email, hash, salt, consent) {
       var id = "u" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       try {
-        await pool.query("INSERT INTO users (id, email, hash, salt) VALUES ($1,$2,$3,$4)", [id, email, hash, salt]);
+        await pool.query("INSERT INTO users (id, email, hash, salt, consent) VALUES ($1,$2,$3,$4,$5)", [id, email, hash, salt, !!consent]);
       } catch (e) {
         if (e && e.code === "23505") return null; // อีเมลซ้ำ
         throw e;
       }
       return { id: id, email: email };
+    },
+    async listSubscribers() {
+      var r = await pool.query("SELECT email, created_at FROM users WHERE consent = true ORDER BY created_at DESC");
+      return r.rows.map(function (x) { return { email: x.email, createdAt: x.created_at }; });
+    },
+    async countUsers() {
+      var r = await pool.query("SELECT count(*)::int AS total, count(*) FILTER (WHERE consent) ::int AS subs FROM users");
+      return { total: r.rows[0].total, subs: r.rows[0].subs };
     },
     async findUserByEmail(email) {
       var r = await pool.query("SELECT id, email, hash, salt FROM users WHERE email=$1", [email]);
