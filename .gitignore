@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# environment variables (may contain secrets: DATABASE_URL, ADMIN_KEY, ...)
+.env
+.env.*
+!.env.example
+
+# logs
+npm-debug.log*
+*.log
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
