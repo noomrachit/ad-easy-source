@@ -11,6 +11,8 @@ var lineHook = require("./lib/line/webhook");
 var metaInbox = require("./lib/meta/inbox");
 var outbound = require("./lib/outbound");
 var morning = require("./lib/content/morning");
+var hookProtect = require("./lib/webhook/protect");
+var grok = require("./lib/grok/client");
 
 var PORT = process.env.PORT || 3000;
 var DB_URL = process.env.DATABASE_URL || "";
@@ -145,6 +147,32 @@ setInterval(function () {
   }
 }, 5 * 60 * 1000).unref();
 
+async function runCleanup() {
+  var r = await store.cleanupExpired();
+  r = r || { sessions: 0, oauth: 0, events: 0 };
+  var body = "session " + r.sessions + " · oauth " + r.oauth + " · processed " + r.events;
+  console.log("[ad-easy] cleanup " + body);
+  lineHook.pushAlert("Ad Easy งานลบของเก่า\n" + body).catch(function () {});
+  var ownerEmail = str(process.env.LINE_OWNER_EMAIL || process.env.META_OWNER_EMAIL, 190).toLowerCase();
+  if (!ownerEmail) return r;
+  var owner = await store.findUserByEmail(ownerEmail);
+  if (!owner) return r;
+  var hourKey = new Date().toISOString().slice(0, 13);
+  await store.addNotification(owner.id, {
+    type: "cleanup",
+    title: "งานลบของเก่าทำงานแล้ว",
+    body: body,
+    leadId: "",
+    dedupeKey: "cleanup:" + hourKey
+  });
+  return r;
+}
+
+setInterval(function () {
+  runCleanup().catch(function (e) { console.error("[ad-easy] cleanup", e && e.message); });
+}, 60 * 60 * 1000).unref();
+
+
 /* ---------------- static ---------------- */
 var TYPES = {
   ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -215,6 +243,7 @@ async function notifyNewLead(userId, lead) {
     leadId: lead.id,
     dedupeKey: "lead_new:" + lead.id
   });
+  lineHook.pushAlert("ลูกค้าใหม่จากแอด: " + lead.name + (lead.platform ? " · " + lead.platform : "")).catch(function () {});
 }
 
 async function syncFollowUpNotices(userId) {
@@ -250,6 +279,10 @@ function shapeCampaign(b) {
 
 /* ---------------- routes ---------------- */
 async function handleLineWebhook(req, res) {
+  if (!hookProtect.requireHttps(req)) {
+    res.writeHead(403).end("https only");
+    return;
+  }
   var raw = await readRaw(req);
   if (!lineHook.configured()) {
     res.writeHead(503, { "content-type": "text/plain" }).end("line not configured");
@@ -270,6 +303,9 @@ async function handleLineWebhook(req, res) {
     var src = ev.source || {};
     var lineUid = src.userId || "";
     if (!lineUid) continue;
+    if (!hookProtect.freshTimestamp(ev.timestamp)) continue;
+    var evId = ev.webhookEventId || ev.replyToken || "";
+    if (evId && !(await store.claimProcessedEvent("line:" + evId, "line"))) continue;
     var isFollow = ev.type === "follow";
     var isText = ev.type === "message" && ev.message && ev.message.type === "text";
     if (!isFollow && !isText) continue;
@@ -310,6 +346,10 @@ async function api(req, res, url) {
     return;
   }
   if (p === "/api/meta/webhook" && m === "POST") {
+    if (!hookProtect.requireHttps(req)) {
+      res.writeHead(403).end("https only");
+      return;
+    }
     var rawM = await readRaw(req);
     if (!metaInbox.verifySignature(rawM, req.headers["x-hub-signature-256"] || req.headers["x-hub-signature"])) {
       res.writeHead(403).end("bad signature");
@@ -324,6 +364,8 @@ async function api(req, res, url) {
     var incoming = metaInbox.parseIncoming(pay);
     for (var mi = 0; mi < incoming.length; mi++) {
       var msg = incoming[mi];
+      if (!hookProtect.freshTimestamp(msg.createdAt)) continue;
+      if (msg.mid && !(await store.claimProcessedEvent("meta:" + msg.mid, "meta"))) continue;
       await store.insertInbox(ownerM.id, { platform: "meta", senderId: msg.senderId, text: msg.text, mid: msg.mid, direction: "in" });
       await store.addNotification(ownerM.id, {
         type: "meta_inbox",
@@ -339,7 +381,50 @@ async function api(req, res, url) {
   if (p === "/api/content/morning" && m === "GET") {
     if (!ADMIN_KEY) return json(res, 404, { error: "ไม่พบหน้านี้" });
     if (!safeEqual(String(url.searchParams.get("key") || ""), ADMIN_KEY)) return json(res, 404, { error: "ไม่พบหน้านี้" });
-    return json(res, 200, morning.packFor(new Date()));
+    var pack = morning.packFor(new Date());
+    pack.source = "calendar";
+    if (grok.configured()) {
+      try {
+        var live = await grok.captionPack(pack.hook || pack.headline || "บาทต่อคลิก");
+        pack.grok = live.text;
+        pack.source = live.cached ? "grok-cache" : "grok";
+      } catch (ge) {
+        pack.grokError = String(ge.message || "grok").slice(0, 180);
+      }
+    }
+    return json(res, 200, pack);
+  }
+
+  if (p === "/api/hooks/status" && m === "GET") {
+    if (!ADMIN_KEY) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    if (!safeEqual(String(url.searchParams.get("key") || ""), ADMIN_KEY)) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    return json(res, 200, {
+      httpsHint: !!(process.env.PUBLIC_BASE_URL && /^https:\/\//i.test(process.env.PUBLIC_BASE_URL)),
+      line: lineHook.configured(),
+      lineAlert: !!lineHook.alertUserId(),
+      metaInbox: metaInbox.configured(),
+      metaOauth: metaOAuth.configured(),
+      grok: grok.configured(),
+      email: outbound.emailConfigured(),
+      sms: outbound.smsConfigured()
+    });
+  }
+
+  if (p === "/api/grok/status" && m === "GET") {
+    return json(res, 200, { configured: grok.configured(), model: process.env.XAI_MODEL || "grok-4.6" });
+  }
+  if (p === "/api/grok/caption" && m === "POST") {
+    if (!ADMIN_KEY) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    var gk = String(url.searchParams.get("key") || "");
+    if (!safeEqual(gk, ADMIN_KEY)) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    if (!grok.configured()) return json(res, 400, { error: "ยังไม่ได้ตั้ง XAI_API_KEY" });
+    var gb = await readBody(req);
+    try {
+      var pack = await grok.captionPack(str(gb.topic, 120) || "บาทต่อคลิก");
+      return json(res, 200, { text: pack.text, cached: !!pack.cached, model: process.env.XAI_MODEL || "grok-4.6" });
+    } catch (ge) {
+      return json(res, 400, { error: ge.message || "เรียก Grok ไม่สำเร็จ" });
+    }
   }
 
   if (p === "/api/register" && m === "POST") {
@@ -455,7 +540,8 @@ async function api(req, res, url) {
       inboxConfigured: metaInbox.configured(),
       outbound: { email: outbound.emailConfigured(), sms: outbound.smsConfigured() },
       morning: morning.packFor(new Date()),
-      integrations: { pipedrive: false, salesforce: false }
+      integrations: { pipedrive: false, salesforce: false },
+      grokConfigured: grok.configured()
     });
   }
 
@@ -677,7 +763,10 @@ var server = http.createServer(function (req, res) {
 });
 
 store.init().then(function () {
-  server.listen(PORT, function () { console.log("[ad-easy] พร้อมใช้งานที่พอร์ต " + PORT); });
+  server.listen(PORT, function () {
+    console.log("[ad-easy] พร้อมใช้งานที่พอร์ต " + PORT);
+    runCleanup().catch(function (e) { console.error("[ad-easy] cleanup", e && e.message); });
+  });
 }).catch(function (e) {
   console.error("[ad-easy] เริ่มระบบไม่สำเร็จ:", e);
   process.exit(1);
