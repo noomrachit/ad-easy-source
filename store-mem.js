@@ -12,10 +12,22 @@ function makeMemStore() {
   var leads = new Map();
   var notes = new Map();
   var inbox = [];
+  var processed = new Map();
   var seq = 1;
 
   return {
     async init() {},
+    async cleanupExpired() {
+      var now = Date.now();
+      var sessionsN = 0, eventsN = 0;
+      for (var tkn of Array.from(sessions.keys())) {
+        if (new Date(sessions.get(tkn).expires) < new Date()) { sessions.delete(tkn); sessionsN++; }
+      }
+      for (var id of Array.from(processed.keys())) {
+        if (now - processed.get(id).seen > 7 * 864e5) { processed.delete(id); eventsN++; }
+      }
+      return { sessions: sessionsN, oauth: 0, events: eventsN };
+    },
 
     async createUser(email, hash, salt, consent) {
       if (users.has(email)) return null;
@@ -207,6 +219,12 @@ function makeMemStore() {
       return inbox.filter(function (x) { return x.userId === userId; }).slice(0, 100).map(function (x) {
         return { id: x.id, platform: x.platform, senderId: x.senderId, text: x.text, mid: x.mid, direction: x.direction, createdAt: x.createdAt };
       });
+    },
+    async claimProcessedEvent(id, source) {
+      if (!id) return true;
+      if (processed.has(id)) return false;
+      processed.set(id, { source: source || "", seen: Date.now() });
+      return true;
     },
     async logOutbound(userId, row) {
       inbox.push({ id: "o" + seq++, userId: userId, kind: "outlog" });
