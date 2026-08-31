@@ -63,8 +63,83 @@ function makePgStore(connectionString) {
         "  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE," +
         "  steps   JSONB NOT NULL)"
       );
-      // เก็บกวาด session ที่หมดอายุ
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS oauth_states (" +
+        "  state      TEXT PRIMARY KEY," +
+        "  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE," +
+        "  platform   TEXT NOT NULL," +
+        "  created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+      );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS ad_connections (" +
+        "  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE," +
+        "  platform        TEXT NOT NULL," +
+        "  meta_user_id    TEXT," +
+        "  meta_user_name  TEXT," +
+        "  token_enc       TEXT NOT NULL," +
+        "  token_expires   TIMESTAMPTZ," +
+        "  accounts        JSONB NOT NULL DEFAULT '[]'," +
+        "  selected_act    TEXT," +
+        "  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()," +
+        "  PRIMARY KEY (user_id, platform))"
+      );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS leads (" +
+        "  id           TEXT PRIMARY KEY," +
+        "  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE," +
+        "  name         TEXT NOT NULL," +
+        "  phone        TEXT NOT NULL DEFAULT ''," +
+        "  email        TEXT NOT NULL DEFAULT ''," +
+        "  platform     TEXT NOT NULL DEFAULT ''," +
+        "  campaign_id  TEXT," +
+        "  status       TEXT NOT NULL DEFAULT 'new'," +
+        "  value        NUMERIC NOT NULL DEFAULT 0," +
+        "  note         TEXT NOT NULL DEFAULT ''," +
+        "  follow_up_on TEXT NOT NULL DEFAULT ''," +
+        "  created_at   TIMESTAMPTZ NOT NULL DEFAULT now())"
+      );
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS follow_up_on TEXT NOT NULL DEFAULT ''");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS line_user_id TEXT NOT NULL DEFAULT ''");
+      await pool.query("CREATE INDEX IF NOT EXISTS leads_user_idx ON leads(user_id)");
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS notifications (" +
+        "  id         TEXT PRIMARY KEY," +
+        "  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE," +
+        "  type       TEXT NOT NULL," +
+        "  title      TEXT NOT NULL," +
+        "  body       TEXT NOT NULL DEFAULT ''," +
+        "  lead_id    TEXT," +
+        "  dedupe_key TEXT NOT NULL," +
+        "  read       BOOLEAN NOT NULL DEFAULT false," +
+        "  created_at TIMESTAMPTZ NOT NULL DEFAULT now()," +
+        "  UNIQUE (user_id, dedupe_key))"
+      );
+      await pool.query("CREATE INDEX IF NOT EXISTS notifications_user_idx ON notifications(user_id, read)");
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS inbox_messages (" +
+        "  id          TEXT PRIMARY KEY," +
+        "  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE," +
+        "  platform    TEXT NOT NULL," +
+        "  sender_id   TEXT NOT NULL," +
+        "  text        TEXT NOT NULL DEFAULT ''," +
+        "  mid         TEXT NOT NULL DEFAULT ''," +
+        "  direction   TEXT NOT NULL DEFAULT 'in'," +
+        "  created_at  TIMESTAMPTZ NOT NULL DEFAULT now())"
+      );
+      await pool.query("CREATE INDEX IF NOT EXISTS inbox_user_idx ON inbox_messages(user_id, created_at DESC)");
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS outbound_log (" +
+        "  id          TEXT PRIMARY KEY," +
+        "  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE," +
+        "  lead_id     TEXT," +
+        "  channel     TEXT NOT NULL," +
+        "  to_addr     TEXT NOT NULL," +
+        "  body        TEXT NOT NULL DEFAULT ''," +
+        "  status      TEXT NOT NULL," +
+        "  created_at  TIMESTAMPTZ NOT NULL DEFAULT now())"
+      );
       await pool.query("DELETE FROM sessions WHERE expires < now()");
+      await pool.query("DELETE FROM oauth_states WHERE created_at < now() - interval '20 minutes'");
     },
 
     async createUser(email, hash, salt, consent) {
@@ -155,7 +230,169 @@ function makePgStore(connectionString) {
         [userId, JSON.stringify(arr)]
       );
       return arr;
+    },
+
+    async saveOauthState(state, userId, platform) {
+      await pool.query(
+        "INSERT INTO oauth_states (state, user_id, platform) VALUES ($1,$2,$3)",
+        [state, userId, platform]
+      );
+    },
+    async takeOauthState(state) {
+      var r = await pool.query(
+        "DELETE FROM oauth_states WHERE state=$1 AND created_at > now() - interval '20 minutes' RETURNING user_id, platform",
+        [state]
+      );
+      return r.rows[0] || null;
+    },
+
+    async upsertAdConnection(userId, platform, row) {
+      await pool.query(
+        "INSERT INTO ad_connections (user_id, platform, meta_user_id, meta_user_name, token_enc, token_expires, accounts, selected_act, updated_at)" +
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())" +
+        " ON CONFLICT (user_id, platform) DO UPDATE SET" +
+        " meta_user_id=EXCLUDED.meta_user_id, meta_user_name=EXCLUDED.meta_user_name," +
+        " token_enc=EXCLUDED.token_enc, token_expires=EXCLUDED.token_expires," +
+        " accounts=EXCLUDED.accounts, selected_act=EXCLUDED.selected_act, updated_at=now()",
+        [
+          userId, platform,
+          row.metaUserId || "", row.metaUserName || "",
+          row.tokenEnc, row.tokenExpires || null,
+          JSON.stringify(row.accounts || []),
+          row.selectedAct || null
+        ]
+      );
+    },
+    async getAdConnection(userId, platform) {
+      var r = await pool.query(
+        "SELECT meta_user_id, meta_user_name, token_enc, token_expires, accounts, selected_act, updated_at" +
+        " FROM ad_connections WHERE user_id=$1 AND platform=$2",
+        [userId, platform]
+      );
+      if (!r.rows[0]) return null;
+      var x = r.rows[0];
+      return {
+        metaUserId: x.meta_user_id,
+        metaUserName: x.meta_user_name,
+        tokenEnc: x.token_enc,
+        tokenExpires: x.token_expires,
+        accounts: x.accounts || [],
+        selectedAct: x.selected_act,
+        updatedAt: x.updated_at
+      };
+    },
+    async setSelectedAdAccount(userId, platform, actId) {
+      var r = await pool.query(
+        "UPDATE ad_connections SET selected_act=$3, updated_at=now() WHERE user_id=$1 AND platform=$2 RETURNING selected_act",
+        [userId, platform, actId]
+      );
+      return r.rowCount > 0;
+    },
+    async deleteAdConnection(userId, platform) {
+      var r = await pool.query("DELETE FROM ad_connections WHERE user_id=$1 AND platform=$2", [userId, platform]);
+      return r.rowCount > 0;
+    },
+
+    async findLeadByLineUser(userId, lineUserId) {
+      if (!lineUserId) return null;
+      var r = await pool.query("SELECT * FROM leads WHERE user_id=$1 AND line_user_id=$2 LIMIT 1", [userId, lineUserId]);
+      return r.rows[0] ? rowToLead(r.rows[0]) : null;
+    },
+    async listLeads(userId) {
+      var r = await pool.query("SELECT * FROM leads WHERE user_id=$1 ORDER BY created_at DESC", [userId]);
+      return r.rows.map(rowToLead);
+    },
+    async insertLead(userId, L) {
+      var id = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      var r = await pool.query(
+        "INSERT INTO leads (id,user_id,name,phone,email,platform,campaign_id,status,value,note,follow_up_on,line_user_id)" +
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",
+        [id, userId, L.name, L.phone || "", L.email || "", L.platform || "", L.campaignId || null, L.status || "new", L.value || 0, L.note || "", L.followUpOn || "", L.lineUserId || ""]
+      );
+      return rowToLead(r.rows[0]);
+    },
+    async updateLead(userId, id, L) {
+      var r = await pool.query(
+        "UPDATE leads SET name=COALESCE($3,name), phone=COALESCE($4,phone), email=COALESCE($5,email)," +
+        " platform=COALESCE($6,platform), campaign_id=$7, status=COALESCE($8,status), value=COALESCE($9,value), note=COALESCE($10,note), follow_up_on=COALESCE($11,follow_up_on)" +
+        " WHERE user_id=$1 AND id=$2 RETURNING *",
+        [userId, id, L.name, L.phone, L.email, L.platform, L.campaignId || null, L.status, L.value, L.note, L.followUpOn == null ? null : L.followUpOn]
+      );
+      return r.rows[0] ? rowToLead(r.rows[0]) : null;
+    },
+    async deleteLead(userId, id) {
+      var r = await pool.query("DELETE FROM leads WHERE user_id=$1 AND id=$2", [userId, id]);
+      return r.rowCount > 0;
+    },
+
+    async addNotification(userId, n) {
+      var id = "n" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      try {
+        await pool.query(
+          "INSERT INTO notifications (id,user_id,type,title,body,lead_id,dedupe_key) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+          [id, userId, n.type, n.title, n.body || "", n.leadId || null, n.dedupeKey]
+        );
+        return true;
+      } catch (e) {
+        if (e && e.code === "23505") return false;
+        throw e;
+      }
+    },
+    async listNotifications(userId) {
+      var r = await pool.query(
+        "SELECT id, type, title, body, lead_id, read, created_at FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",
+        [userId]
+      );
+      return r.rows.map(function (x) {
+        return { id: x.id, type: x.type, title: x.title, body: x.body, leadId: x.lead_id || "", read: !!x.read, createdAt: x.created_at };
+      });
+    },
+    async markNotificationsRead(userId, id) {
+      if (id) await pool.query("UPDATE notifications SET read=true WHERE user_id=$1 AND id=$2", [userId, id]);
+      else await pool.query("UPDATE notifications SET read=true WHERE user_id=$1 AND read=false", [userId]);
+    },
+    async insertInbox(userId, row) {
+      var id = "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      var r = await pool.query(
+        "INSERT INTO inbox_messages (id,user_id,platform,sender_id,text,mid,direction) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+        [id, userId, row.platform || "meta", row.senderId || "", row.text || "", row.mid || "", row.direction || "in"]
+      );
+      var x = r.rows[0];
+      return { id: x.id, platform: x.platform, senderId: x.sender_id, text: x.text, mid: x.mid, direction: x.direction, createdAt: x.created_at };
+    },
+    async listInbox(userId) {
+      var r = await pool.query(
+        "SELECT id, platform, sender_id, text, mid, direction, created_at FROM inbox_messages WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100",
+        [userId]
+      );
+      return r.rows.map(function (x) {
+        return { id: x.id, platform: x.platform, senderId: x.sender_id, text: x.text, mid: x.mid, direction: x.direction, createdAt: x.created_at };
+      });
+    },
+    async logOutbound(userId, row) {
+      var id = "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      await pool.query(
+        "INSERT INTO outbound_log (id,user_id,lead_id,channel,to_addr,body,status) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        [id, userId, row.leadId || null, row.channel, row.to || "", row.body || "", row.status || "sent"]
+      );
     }
+  };
+}
+
+function rowToLead(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    phone: r.phone || "",
+    email: r.email || "",
+    platform: r.platform || "",
+    campaignId: r.campaign_id || "",
+    status: r.status,
+    value: Number(r.value) || 0,
+    note: r.note || "",
+    followUpOn: r.follow_up_on || "",
+    lineUserId: r.line_user_id || "",
+    createdAt: r.created_at
   };
 }
 
