@@ -5,6 +5,12 @@ var http = require("node:http");
 var fs = require("node:fs");
 var path = require("node:path");
 var crypto = require("node:crypto");
+var secret = require("./lib/secret");
+var metaOAuth = require("./lib/ads/meta-oauth");
+var lineHook = require("./lib/line/webhook");
+var metaInbox = require("./lib/meta/inbox");
+var outbound = require("./lib/outbound");
+var morning = require("./lib/content/morning");
 
 var PORT = process.env.PORT || 3000;
 var DB_URL = process.env.DATABASE_URL || "";
@@ -21,6 +27,7 @@ if (!DB_URL) console.warn("[ad-easy] ไม่พบ DATABASE_URL — กำล�
 var PLATFORMS = ["Facebook", "Instagram", "TikTok"];
 var OBJECTIVES = ["เพิ่มยอดขาย", "สร้างการรับรู้", "หาลูกค้าใหม่"];
 var STATUSES = ["active", "paused", "ended"];
+var LEAD_STATUSES = ["new", "contacted", "qualified", "won", "lost"];
 var SESSION_DAYS = 30;
 
 function json(res, code, obj) {
@@ -31,6 +38,19 @@ function json(res, code, obj) {
     "cache-control": "no-store"
   });
   res.end(body);
+}
+function readRaw(req, limit) {
+  limit = limit || 1024 * 1024;
+  return new Promise(function (resolve, reject) {
+    var chunks = [], size = 0;
+    req.on("data", function (c) {
+      size += c.length;
+      if (size > limit) { reject(new Error("payload_too_large")); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on("end", function () { resolve(Buffer.concat(chunks)); });
+    req.on("error", reject);
+  });
 }
 function readBody(req, limit) {
   limit = limit || 2 * 1024 * 1024;
@@ -91,6 +111,23 @@ function str(v, max) { return String(v == null ? "" : v).trim().slice(0, max || 
 function pickEnum(v, list, dflt) { return list.indexOf(v) !== -1 ? v : dflt; }
 function validEmail(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) && e.length <= 190; }
 
+function redirect(res, loc) {
+  res.writeHead(302, { location: loc, "cache-control": "no-store" });
+  res.end();
+}
+
+async function publicMetaConnection(userId) {
+  var row = await store.getAdConnection(userId, "meta");
+  if (!row) return { connected: false, accounts: [], selectedAct: null, name: "" };
+  return {
+    connected: true,
+    name: row.metaUserName || "",
+    accounts: row.accounts || [],
+    selectedAct: row.selectedAct || null,
+    updatedAt: row.updatedAt || null
+  };
+}
+
 /* ---------------- rate limiting (in-process) ---------------- */
 var attempts = new Map();
 function tooManyAttempts(key) {
@@ -148,6 +185,56 @@ async function currentUser(req) {
 }
 
 /* ---------------- campaign shaping ---------------- */
+function shapeLead(b) {
+  var plat = String(b.platform || "").trim();
+  if (PLATFORMS.indexOf(plat) === -1) plat = "";
+  return {
+    name: str(b.name, 80),
+    phone: str(b.phone, 40),
+    email: str(b.email, 190).toLowerCase(),
+    platform: plat,
+    campaignId: str(b.campaignId, 64),
+    status: pickEnum(b.status, LEAD_STATUSES, "new"),
+    value: num(b.value),
+    note: str(b.note, 500),
+    followUpOn: /^\d{4}-\d{2}-\d{2}$/.test(String(b.followUpOn || "")) ? String(b.followUpOn) : ""
+  };
+}
+
+function plusDays(n) {
+  var d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+async function notifyNewLead(userId, lead) {
+  await store.addNotification(userId, {
+    type: "lead_new",
+    title: "ลูกค้าใหม่จากแอด",
+    body: lead.name + (lead.platform ? " · " + lead.platform : ""),
+    leadId: lead.id,
+    dedupeKey: "lead_new:" + lead.id
+  });
+}
+
+async function syncFollowUpNotices(userId) {
+  var list = await store.listLeads(userId);
+  var today = new Date().toISOString().slice(0, 10);
+  for (var i = 0; i < list.length; i++) {
+    var L = list[i];
+    if (!L.followUpOn || L.status === "won" || L.status === "lost") continue;
+    if (L.followUpOn > today) continue;
+    var overdue = L.followUpOn < today;
+    await store.addNotification(userId, {
+      type: overdue ? "follow_overdue" : "follow_due",
+      title: overdue ? "เลยกำหนดติดตามลูกค้า" : "ถึงวันติดตามลูกค้า",
+      body: L.name + " · นัด " + L.followUpOn,
+      leadId: L.id,
+      dedupeKey: "follow:" + L.id + ":" + L.followUpOn
+    });
+  }
+}
+
 function shapeCampaign(b) {
   return {
     name: str(b.name, 120),
@@ -162,9 +249,98 @@ function shapeCampaign(b) {
 }
 
 /* ---------------- routes ---------------- */
+async function handleLineWebhook(req, res) {
+  var raw = await readRaw(req);
+  if (!lineHook.configured()) {
+    res.writeHead(503, { "content-type": "text/plain" }).end("line not configured");
+    return;
+  }
+  if (!lineHook.verify(raw, req.headers["x-line-signature"])) {
+    res.writeHead(403).end("bad signature");
+    return;
+  }
+  res.writeHead(200).end("ok");
+  var payload = {};
+  try { payload = JSON.parse(raw.toString("utf8") || "{}"); } catch (e) { return; }
+  var ownerEmail = str(process.env.LINE_OWNER_EMAIL, 190).toLowerCase();
+  var owner = ownerEmail ? await store.findUserByEmail(ownerEmail) : null;
+  var events = payload.events || [];
+  for (var i = 0; i < events.length; i++) {
+    var ev = events[i];
+    var src = ev.source || {};
+    var lineUid = src.userId || "";
+    if (!lineUid) continue;
+    var isFollow = ev.type === "follow";
+    var isText = ev.type === "message" && ev.message && ev.message.type === "text";
+    if (!isFollow && !isText) continue;
+    var existing = owner ? await store.findLeadByLineUser(owner.id, lineUid) : null;
+    var texts = [];
+    if (!existing) texts.push(lineHook.welcomeText());
+    if (!existing && lineHook.afterHours()) texts.push(lineHook.afterHoursText());
+    if (ev.replyToken && texts.length) await lineHook.reply(ev.replyToken, texts.slice(0, 2));
+    if (!owner) continue;
+    var snippet = isText ? str(ev.message.text, 200) : "เพิ่มเพื่อน LINE OA";
+    if (!existing) {
+      var lead = await store.insertLead(owner.id, {
+        name: "LINE " + lineUid.slice(-6),
+        phone: "", email: "", platform: "", campaignId: "",
+        status: "new", value: 0, note: snippet,
+        followUpOn: plusDays(2), lineUserId: lineUid
+      });
+      await notifyNewLead(owner.id, lead);
+    }
+  }
+}
+
 async function api(req, res, url) {
   var p = url.pathname;
   var m = req.method;
+
+  if (p === "/api/line/webhook" && m === "POST") {
+    return handleLineWebhook(req, res);
+  }
+  if (p === "/api/line/webhook" && m === "GET") {
+    return json(res, 200, { ok: true, configured: lineHook.configured() });
+  }
+
+  if (p === "/api/meta/webhook" && m === "GET") {
+    var challenge = metaInbox.verifySubscribe(url.searchParams);
+    if (challenge == null) { res.writeHead(403).end("verify failed"); return; }
+    res.writeHead(200, { "content-type": "text/plain" }).end(challenge);
+    return;
+  }
+  if (p === "/api/meta/webhook" && m === "POST") {
+    var rawM = await readRaw(req);
+    if (!metaInbox.verifySignature(rawM, req.headers["x-hub-signature-256"] || req.headers["x-hub-signature"])) {
+      res.writeHead(403).end("bad signature");
+      return;
+    }
+    res.writeHead(200).end("ok");
+    var pay = {};
+    try { pay = JSON.parse(rawM.toString("utf8") || "{}"); } catch (e) { return; }
+    var ownerEm = str(process.env.META_OWNER_EMAIL || process.env.LINE_OWNER_EMAIL, 190).toLowerCase();
+    var ownerM = ownerEm ? await store.findUserByEmail(ownerEm) : null;
+    if (!ownerM) return;
+    var incoming = metaInbox.parseIncoming(pay);
+    for (var mi = 0; mi < incoming.length; mi++) {
+      var msg = incoming[mi];
+      await store.insertInbox(ownerM.id, { platform: "meta", senderId: msg.senderId, text: msg.text, mid: msg.mid, direction: "in" });
+      await store.addNotification(ownerM.id, {
+        type: "meta_inbox",
+        title: "ข้อความใหม่ในอินบ็อกซ์ Meta",
+        body: (msg.text || "").slice(0, 80) || "ข้อความไม่มีตัวอักษร",
+        leadId: "",
+        dedupeKey: "meta_in:" + (msg.mid || msg.senderId + Date.now())
+      });
+    }
+    return;
+  }
+
+  if (p === "/api/content/morning" && m === "GET") {
+    if (!ADMIN_KEY) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    if (!safeEqual(String(url.searchParams.get("key") || ""), ADMIN_KEY)) return json(res, 404, { error: "ไม่พบหน้านี้" });
+    return json(res, 200, morning.packFor(new Date()));
+  }
 
   if (p === "/api/register" && m === "POST") {
     var b = await readBody(req);
@@ -231,16 +407,179 @@ async function api(req, res, url) {
     return res.end("﻿" + csv);
   }
 
+  if (p === "/api/connect/meta/callback" && m === "GET") {
+    var errQ = url.searchParams.get("error_description") || url.searchParams.get("error");
+    if (errQ) return redirect(res, "/?meta=denied");
+    var state = String(url.searchParams.get("state") || "");
+    var code = String(url.searchParams.get("code") || "");
+    var st = state ? await store.takeOauthState(state) : null;
+    if (!st || st.platform !== "meta" || !code) return redirect(res, "/?meta=bad_state");
+    try {
+      var tok = await metaOAuth.exchangeCode(req, code);
+      var listed = await metaOAuth.listAdAccounts(tok.accessToken);
+      var selected = listed.accounts[0] ? listed.accounts[0].id : null;
+      await store.upsertAdConnection(st.user_id, "meta", {
+        metaUserId: listed.user.id,
+        metaUserName: listed.user.name,
+        tokenEnc: secret.encrypt(tok.accessToken),
+        tokenExpires: tok.expiresAt,
+        accounts: listed.accounts,
+        selectedAct: selected
+      });
+      return redirect(res, "/?meta=ok");
+    } catch (e) {
+      console.error("[ad-easy] meta oauth", e && e.message);
+      return redirect(res, "/?meta=fail");
+    }
+  }
+
   var me = await currentUser(req);
 
   if (p === "/api/me" && m === "GET") {
     if (!me) return json(res, 200, { user: null });
     var camps = await store.listCampaigns(me.id);
     var guide = await store.getGuide(me.id);
-    return json(res, 200, { user: { email: me.email }, campaigns: camps, guide: guide });
+    var metaConn = await publicMetaConnection(me.id);
+    var leadList = await store.listLeads(me.id);
+    await syncFollowUpNotices(me.id);
+    var noteList = await store.listNotifications(me.id);
+    return json(res, 200, {
+      user: { email: me.email },
+      campaigns: camps,
+      leads: leadList,
+      notifications: noteList,
+      guide: guide,
+      meta: metaConn,
+      metaConfigured: metaOAuth.configured(),
+      inbox: await store.listInbox(me.id),
+      inboxConfigured: metaInbox.configured(),
+      outbound: { email: outbound.emailConfigured(), sms: outbound.smsConfigured() },
+      morning: morning.packFor(new Date()),
+      integrations: { pipedrive: false, salesforce: false }
+    });
   }
 
   if (!me) return json(res, 401, { error: "ต้องเข้าสู่ระบบก่อน" });
+
+  if (p === "/api/connect/meta/start" && m === "GET") {
+    if (!metaOAuth.configured()) {
+      return json(res, 400, { error: "ยังไม่ได้ตั้ง META_APP_ID และ META_APP_SECRET บนเซิร์ฟเวอร์" });
+    }
+    var state2 = crypto.randomBytes(24).toString("hex");
+    await store.saveOauthState(state2, me.id, "meta");
+    return json(res, 200, { url: metaOAuth.authUrl(req, state2) });
+  }
+
+  if (p === "/api/ad-accounts" && m === "GET") {
+    return json(res, 200, { meta: await publicMetaConnection(me.id), metaConfigured: metaOAuth.configured() });
+  }
+
+  if (p === "/api/ad-accounts" && m === "PUT") {
+    var ab = await readBody(req);
+    var act = str(ab.selectedAct, 40);
+    if (!act) return json(res, 400, { error: "เลือกบัญชีโฆษณาก่อน" });
+    var okSel = await store.setSelectedAdAccount(me.id, "meta", act);
+    if (!okSel) return json(res, 404, { error: "ยังไม่ได้เชื่อมบัญชี Meta" });
+    return json(res, 200, { meta: await publicMetaConnection(me.id) });
+  }
+
+  if (p === "/api/ad-accounts" && m === "POST") {
+    var row = await store.getAdConnection(me.id, "meta");
+    if (!row || !row.tokenEnc) return json(res, 400, { error: "ยังไม่ได้เชื่อมบัญชี Meta" });
+    try {
+      var listed2 = await metaOAuth.listAdAccounts(secret.decrypt(row.tokenEnc));
+      await store.upsertAdConnection(me.id, "meta", {
+        metaUserId: listed2.user.id,
+        metaUserName: listed2.user.name,
+        tokenEnc: row.tokenEnc,
+        tokenExpires: row.tokenExpires,
+        accounts: listed2.accounts,
+        selectedAct: row.selectedAct || (listed2.accounts[0] && listed2.accounts[0].id) || null
+      });
+      return json(res, 200, { meta: await publicMetaConnection(me.id) });
+    } catch (e2) {
+      return json(res, 400, { error: e2.message || "รีเฟรชบัญชีโฆษณาไม่สำเร็จ ลองเชื่อมใหม่" });
+    }
+  }
+
+  if (p === "/api/connect/meta" && m === "DELETE") {
+    await store.deleteAdConnection(me.id, "meta");
+    return json(res, 200, { ok: true, meta: { connected: false, accounts: [] } });
+  }
+
+  if (p === "/api/notifications" && m === "GET") {
+    await syncFollowUpNotices(me.id);
+    return json(res, 200, { notifications: await store.listNotifications(me.id) });
+  }
+  if (p === "/api/notifications" && m === "POST") {
+    var nb2 = await readBody(req);
+    await store.markNotificationsRead(me.id, str(nb2.id, 64) || null);
+    return json(res, 200, { notifications: await store.listNotifications(me.id) });
+  }
+
+  if (p === "/api/inbox" && m === "GET") {
+    return json(res, 200, { inbox: await store.listInbox(me.id), configured: metaInbox.configured() });
+  }
+  if (p === "/api/inbox/reply" && m === "POST") {
+    var rb = await readBody(req);
+    var psid = str(rb.senderId, 64);
+    var text = str(rb.text, 2000);
+    if (!psid || !text) return json(res, 400, { error: "ใส่ผู้ส่งและข้อความ" });
+    if (!metaInbox.configured()) return json(res, 400, { error: "ยังไม่ได้ตั้ง META_PAGE_ACCESS_TOKEN และ META_WEBHOOK_VERIFY_TOKEN" });
+    var sent = await metaInbox.sendText(psid, text);
+    if (sent && sent.error) return json(res, 400, { error: sent.error.message || "ส่งไม่สำเร็จ" });
+    await store.insertInbox(me.id, { platform: "meta", senderId: psid, text: text, mid: "", direction: "out" });
+    return json(res, 200, { inbox: await store.listInbox(me.id) });
+  }
+
+  if (p === "/api/leads/" && false) {}
+  var om = p.match(/^\/api\/leads\/([A-Za-z0-9_-]{1,64})\/(email|sms)$/);
+  if (om && m === "POST") {
+    var allLeads = await store.listLeads(me.id);
+    var target = allLeads.filter(function (x) { return x.id === om[1]; })[0];
+    if (!target) return json(res, 404, { error: "ไม่พบลูกค้า" });
+    var ob = await readBody(req);
+    var bodyTxt = str(ob.text, 1000) || ("สวัสดี " + target.name + " ติดตามจากโฆษณา");
+    try {
+      if (om[2] === "email") {
+        if (!target.email) return json(res, 400, { error: "ลูกค้าคนนี้ยังไม่มีอีเมล" });
+        await outbound.sendEmail(target.email, str(ob.subject, 120) || "ข้อความจากร้าน", bodyTxt);
+        await store.logOutbound(me.id, { leadId: target.id, channel: "email", to: target.email, body: bodyTxt, status: "sent" });
+      } else {
+        if (!target.phone) return json(res, 400, { error: "ลูกค้าคนนี้ยังไม่มีเบอร์" });
+        await outbound.sendSms(target.phone, bodyTxt);
+        await store.logOutbound(me.id, { leadId: target.id, channel: "sms", to: target.phone, body: bodyTxt, status: "sent" });
+      }
+    } catch (oe) {
+      return json(res, 400, { error: oe.message || "ส่งไม่สำเร็จ" });
+    }
+    return json(res, 200, { ok: true });
+  }
+
+  if (p === "/api/leads" && m === "GET") {
+    return json(res, 200, { leads: await store.listLeads(me.id) });
+  }
+  if (p === "/api/leads" && m === "POST") {
+    var lb = shapeLead(await readBody(req));
+    if (!lb.name) return json(res, 400, { error: "ต้องใส่ชื่อลูกค้า" });
+    if (!lb.followUpOn && (lb.status === "new" || lb.status === "contacted")) lb.followUpOn = plusDays(2);
+    var createdLead = await store.insertLead(me.id, lb);
+    await notifyNewLead(me.id, createdLead);
+    return json(res, 200, { lead: createdLead, notifications: await store.listNotifications(me.id) });
+  }
+  var lm = p.match(/^\/api\/leads\/([A-Za-z0-9_-]{1,64})$/);
+  if (lm && m === "PUT") {
+    var lp = shapeLead(await readBody(req));
+    if (!lp.name) return json(res, 400, { error: "ต้องใส่ชื่อลูกค้า" });
+    var lu = await store.updateLead(me.id, lm[1], lp);
+    if (!lu) return json(res, 404, { error: "ไม่พบรายการนี้" });
+    await syncFollowUpNotices(me.id);
+    return json(res, 200, { lead: lu, notifications: await store.listNotifications(me.id) });
+  }
+  if (lm && m === "DELETE") {
+    var okL = await store.deleteLead(me.id, lm[1]);
+    return json(res, okL ? 200 : 404, okL ? { ok: true } : { error: "ไม่พบรายการนี้" });
+  }
 
   if (p === "/api/campaigns" && m === "GET") {
     return json(res, 200, { campaigns: await store.listCampaigns(me.id) });
