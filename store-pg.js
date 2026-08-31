@@ -138,8 +138,26 @@ function makePgStore(connectionString) {
         "  status      TEXT NOT NULL," +
         "  created_at  TIMESTAMPTZ NOT NULL DEFAULT now())"
       );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS processed_events (" +
+        "  id         TEXT PRIMARY KEY," +
+        "  source     TEXT NOT NULL," +
+        "  seen_at    TIMESTAMPTZ NOT NULL DEFAULT now())"
+      );
       await pool.query("DELETE FROM sessions WHERE expires < now()");
       await pool.query("DELETE FROM oauth_states WHERE created_at < now() - interval '20 minutes'");
+      await pool.query("DELETE FROM processed_events WHERE seen_at < now() - interval '7 days'");
+    },
+
+    async cleanupExpired() {
+      var a = await pool.query("DELETE FROM sessions WHERE expires < now()");
+      var b = await pool.query("DELETE FROM oauth_states WHERE created_at < now() - interval '20 minutes'");
+      var c = await pool.query("DELETE FROM processed_events WHERE seen_at < now() - interval '7 days'");
+      return {
+        sessions: a.rowCount || 0,
+        oauth: b.rowCount || 0,
+        events: c.rowCount || 0
+      };
     },
 
     async createUser(email, hash, salt, consent) {
@@ -368,6 +386,16 @@ function makePgStore(connectionString) {
       return r.rows.map(function (x) {
         return { id: x.id, platform: x.platform, senderId: x.sender_id, text: x.text, mid: x.mid, direction: x.direction, createdAt: x.created_at };
       });
+    },
+    async claimProcessedEvent(id, source) {
+      if (!id) return true;
+      try {
+        await pool.query("INSERT INTO processed_events (id, source) VALUES ($1,$2)", [id, source || ""]);
+        return true;
+      } catch (e) {
+        if (e && e.code === "23505") return false;
+        throw e;
+      }
     },
     async logOutbound(userId, row) {
       var id = "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
